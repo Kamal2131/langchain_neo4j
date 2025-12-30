@@ -22,6 +22,7 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+.coverage
 
 # Neo4j
 neo4j_data/
