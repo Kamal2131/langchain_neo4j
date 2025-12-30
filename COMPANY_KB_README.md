@@ -202,5 +202,3 @@ python scripts/load_company_kb.py
 5. **Deploy to cloud** - AWS, Azure, or GCP
 
 ---
-
-**Your production-ready company knowledge base is ready to use!** 🎉
