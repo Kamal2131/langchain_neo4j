@@ -1,0 +1,5 @@
+langchain==0.1.6
+langchain-openai==0.0.5
+langchain-groq==0.0.1
+neo4j==5.16.0
+python-dotenv==1.0.0
