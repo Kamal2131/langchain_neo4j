@@ -3,14 +3,16 @@ FastAPI main application.
 """
 
 from contextlib import asynccontextmanager
+from typing import Any, AsyncGenerator, Dict
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
+from src.api.routes import company, health, query
 from src.core.config import settings
-from src.core.logging import setup_logging, get_logger
+from src.core.logging import get_logger, setup_logging
 from src.services.neo4j_service import neo4j_service
-from src.api.routes import health, query, company
 
 # Setup logging
 setup_logging()
@@ -18,21 +20,21 @@ logger = get_logger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan events."""
     # Startup
     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
     logger.info(f"Environment: {settings.environment}")
-    
+
     # Connect to Neo4j
     try:
         neo4j_service.connect()
         logger.info("Neo4j connection established")
     except Exception as e:
         logger.error(f"Failed to connect to Neo4j: {e}")
-    
+
     yield
-    
+
     # Shutdown
     logger.info("Shutting down application")
     neo4j_service.close()
@@ -46,7 +48,7 @@ app = FastAPI(
     docs_url=f"{settings.api_prefix}/docs",
     redoc_url=f"{settings.api_prefix}/redoc",
     openapi_url=f"{settings.api_prefix}/openapi.json",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
 # Add CORS middleware
@@ -65,24 +67,24 @@ app.include_router(company.router, prefix=settings.api_prefix)  # Company KB rou
 
 
 @app.get("/", include_in_schema=False)
-async def root():
+async def root() -> RedirectResponse:
     """Redirect root to API docs."""
     return RedirectResponse(url=f"{settings.api_prefix}/docs")
 
 
 @app.get("/health", include_in_schema=False)
-async def root_health():
+async def root_health() -> Dict[str, str]:
     """Quick health check at root level."""
     return {"status": "ok", "service": settings.app_name}
 
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     uvicorn.run(
         "src.main:app",
         host=settings.api_host,
         port=settings.api_port,
         reload=settings.debug,
-        log_level=settings.log_level.lower()
+        log_level=settings.log_level.lower(),
     )

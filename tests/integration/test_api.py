@@ -53,7 +53,7 @@ def test_query_endpoint_validation(client):
     # Empty question
     response = client.post("/api/v1/query", json={"question": ""})
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
-    
+
     # Missing question
     response = client.post("/api/v1/query", json={})
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
@@ -63,17 +63,13 @@ def test_query_endpoint_validation(client):
 async def test_query_endpoint_success(client, sample_query):
     """Test successful query."""
     response = client.post(
-        "/api/v1/query",
-        json={"question": sample_query, "include_cypher": False}
+        "/api/v1/query", json={"question": sample_query, "include_cypher": False}
     )
-    
+
     # May fail if Neo4j is not connected or LLM key is missing
     # So we check for either success or expected error
-    assert response.status_code in [
-        status.HTTP_200_OK,
-        status.HTTP_500_INTERNAL_SERVER_ERROR
-    ]
-    
+    assert response.status_code in [status.HTTP_200_OK, status.HTTP_500_INTERNAL_SERVER_ERROR]
+
     if response.status_code == status.HTTP_200_OK:
         data = response.json()
         assert "question" in data

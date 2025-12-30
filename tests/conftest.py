@@ -4,8 +4,9 @@ Pytest configuration and fixtures.
 
 import pytest
 from fastapi.testclient import TestClient
-from src.main import app
+
 from src.core.config import settings
+from src.main import app
 
 
 @pytest.fixture
