@@ -9,6 +9,11 @@ from src.core.config import settings
 from src.core.logging import get_logger
 from src.services.neo4j_service import neo4j_service
 
+try:
+    from src.services.celery_service import celery_app
+except ImportError:
+    celery_app = None
+
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/health", tags=["Health"])
@@ -29,8 +34,41 @@ async def health_check() -> HealthResponse:
         HealthResponse with status and connection information
     """
     neo4j_healthy = neo4j_service.health_check()
+    
+    # Check Redis connection
+    redis_healthy = False
+    try:
+        import redis
+        r = redis.Redis(
+            host=settings.redis_host,
+            port=settings.redis_port,
+            db=settings.redis_db,
+            password=settings.redis_password,
+            socket_connect_timeout=2
+        )
+        r.ping()
+        redis_healthy = True
+        r.close()
+    except Exception as e:
+        logger.warning(f"Redis health check failed: {e}")
+    
+    # Check Celery workers
+    celery_healthy = False
+    active_workers = 0
+    try:
+        if celery_app:
+            inspect = celery_app.control.inspect()
+            stats = inspect.stats()
+            if stats:
+                active_workers = len(stats)
+                celery_healthy = True
+    except Exception as e:
+        logger.warning(f"Celery health check failed: {e}")
 
-    health_status = "healthy" if neo4j_healthy else "degraded"
+    # Overall health status
+    health_status = "healthy" if (neo4j_healthy and redis_healthy) else "degraded"
+    if not neo4j_healthy:
+        health_status = "unhealthy"
 
     return HealthResponse(
         status=health_status,
@@ -39,6 +77,9 @@ async def health_check() -> HealthResponse:
             "environment": settings.environment,
             "version": settings.app_version,
             "llm_provider": settings.llm_provider,
+            "redis_connected": redis_healthy,
+            "celery_workers": active_workers,
+            "celery_healthy": celery_healthy,
         },
     )
 

@@ -28,6 +28,12 @@ docker-logs:  ## View Docker logs
 load-data:  ## Load data into Neo4j
 	python scripts/load_data.py
 
+run-worker:  ## Run Celery worker for background jobs
+	celery -A src.celery_worker worker --loglevel=info --pool=solo
+
+run-flower:  ## Run Flower (Celery monitoring UI)
+	celery -A src.celery_worker flower --port=5555
+
 test:  ## Run tests
 	pytest tests/ -v
 

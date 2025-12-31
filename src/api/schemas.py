@@ -53,3 +53,31 @@ class ErrorResponse(BaseModel):
 
     error: str = Field(..., description="Error message")
     details: Optional[Dict[str, Any]] = Field(None, description="Error details")
+
+
+class AsyncQueryResponse(BaseModel):
+    """Response model for async query submission."""
+    
+    task_id: str = Field(..., description="Celery task ID")
+    status: str = Field(default="PENDING", description="Task status")
+    message: str = Field(default="Query submitted for background processing", description="Status message")
+
+
+class TaskStatusResponse(BaseModel):
+    """Response model for task status check."""
+    
+    task_id: str = Field(..., description="Celery task ID")
+    status: str = Field(..., description="Task status (PENDING, PROGRESS, SUCCESS, FAILURE)")
+    message: str = Field(..., description="Status message")
+    ready: Optional[bool] = Field(None, description="Whether task is complete")
+    error: Optional[str] = Field(None, description="Error message if failed")
+
+
+class TaskResultResponse(BaseModel):
+    """Response model for task result retrieval."""
+    
+    task_id: str = Field(..., description="Celery task ID")
+    status: str = Field(..., description="Task status")
+    result: Optional[QueryResponse] = Field(None, description="Query result if successful")
+    error: Optional[str] = Field(None, description="Error details if failed")
+

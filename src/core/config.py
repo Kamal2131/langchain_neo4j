@@ -26,6 +26,15 @@ class Settings(BaseSettings):
     neo4j_uri: str = Field(default="bolt://localhost:7687", alias="NEO4J_URI")
     neo4j_username: str = Field(default="neo4j", alias="NEO4J_USERNAME")
     neo4j_password: str = Field(default="password123", alias="NEO4J_PASSWORD")
+    
+    # Neo4j Connection Pool Settings
+    neo4j_max_pool_size: int = Field(default=50, alias="NEO4J_MAX_POOL_SIZE")
+    neo4j_connection_timeout: int = Field(default=30, alias="NEO4J_CONNECTION_TIMEOUT")
+    neo4j_max_connection_lifetime: int = Field(default=3600, alias="NEO4J_MAX_CONNECTION_LIFETIME")
+    
+    # Query Optimization Settings
+    query_timeout: int = Field(default=30, alias="QUERY_TIMEOUT", description="Query timeout in seconds")
+    query_max_results: int = Field(default=1000, alias="QUERY_MAX_RESULTS", description="Maximum query result limit")
 
     # LLM Provider Configuration
     llm_provider: Literal["openai", "groq"] = Field(default="openai", alias="LLM_PROVIDER")
@@ -55,6 +64,27 @@ class Settings(BaseSettings):
     # Logging
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: Literal["json", "text"] = "text"
+
+    # Redis Configuration
+    redis_host: str = Field(default="localhost", alias="REDIS_HOST")
+    redis_port: int = Field(default=6379, alias="REDIS_PORT")
+    redis_db: int = Field(default=0, alias="REDIS_DB")
+    redis_password: Optional[str] = Field(default=None, alias="REDIS_PASSWORD")
+    
+    # Celery Configuration
+    celery_broker_url: str = Field(
+        default="redis://localhost:6379/0", 
+        alias="CELERY_BROKER_URL"
+    )
+    celery_result_backend: str = Field(
+        default="redis://localhost:6379/0", 
+        alias="CELERY_RESULT_BACKEND"
+    )
+    celery_task_timeout: int = Field(
+        default=300, 
+        alias="CELERY_TASK_TIMEOUT",
+        description="Celery task timeout in seconds"
+    )
 
     @field_validator("llm_provider")
     @classmethod
