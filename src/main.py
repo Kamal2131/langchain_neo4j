@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
-from src.api.routes import company, health, query
+from src.api.routes import admin, company, health, query
 from src.core.config import settings
 from src.core.logging import get_logger, setup_logging
 from src.services.neo4j_service import neo4j_service
@@ -64,6 +64,7 @@ app.add_middleware(
 app.include_router(health.router, prefix=settings.api_prefix)
 app.include_router(query.router, prefix=settings.api_prefix)
 app.include_router(company.router, prefix=settings.api_prefix)  # Company KB routes
+app.include_router(admin.router, prefix=settings.api_prefix)  # Admin routes
 
 
 @app.get("/", include_in_schema=False)

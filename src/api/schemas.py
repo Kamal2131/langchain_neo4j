@@ -28,7 +28,7 @@ class QueryResponse(BaseModel):
     question: str = Field(..., description="Original question")
     answer: str = Field(..., description="Answer to the question")
     cypher_query: Optional[str] = Field(None, description="Generated Cypher query")
-    metadata: Dict[str, str] = Field(default_factory=dict, description="Query metadata")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Query metadata")
 
 
 class SchemaResponse(BaseModel):

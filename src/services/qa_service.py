@@ -2,6 +2,7 @@
 QA service for natural language query processing.
 """
 
+import time
 from typing import Any, Dict, Optional
 
 from langchain.chains import GraphCypherQAChain
@@ -13,6 +14,7 @@ from langchain_core.prompts import PromptTemplate
 from src.core.config import settings
 from src.core.exceptions import LLMProviderError, QueryExecutionError
 from src.core.logging import get_logger
+from src.services.vector_service import vector_service
 
 logger = get_logger(__name__)
 
@@ -21,69 +23,20 @@ CYPHER_GENERATION_TEMPLATE = """Task: Generate a Cypher statement to query a Neo
 === DATABASE SCHEMA ===
 {schema}
 
-=== NODE TYPES AND PROPERTIES ===
-
-1. **Employee** - Company employees
-   - id: String (e.g., "EMP0001")
-   - name: String (e.g., "John Smith")
-   - email: String (unique email address)
-   - title: String (e.g., "Software Engineer", "DevOps Engineer", "Product Manager", "ML Engineer", "Data Scientist", "AI Engineer", "Sales Manager", "UI Designer", "Cloud Architect", "Full Stack Engineer", "Staff Engineer", "Engineering Manager", "VP of Product", "Creative Director")
-   - department: String (matches Department.name)
-   - location: String (e.g., "San Francisco", "Austin", "Seattle", "Chicago", "New York", "Remote")
-   - hire_date: Date
-   - salary: Integer
-   - level: String - ONE OF: "Junior", "Mid", "Senior", "Staff", "Principal"
-   - bio: String
-   - phone: String
-
-2. **Department** - Company departments
-   - name: String (unique) - ONE OF: "Engineering", "Data Science", "DevOps", "Product", "Sales", "Marketing", "Design", "Customer Success"
-
-3. **Project** - Company projects
-   - project_id: String (unique, e.g., "PROJ001")
-   - name: String
-   - description: String
-   - status: String - ONE OF: "active", "planning", "on-hold", "completed", "cancelled"
-   - budget: Integer
-   - start_date: Date
-   - end_date: Date (optional)
-   - priority: String - ONE OF: "low", "medium", "high", "critical"
-
-4. **Skill** - Technical and soft skills
-   - name: String (unique, e.g., "Python", "React", "AWS", "Docker", "Kubernetes", "TypeScript", "SQL", "Machine Learning", "TensorFlow", "Go", "Java", "Leadership", "Communication")
-   - category: String (e.g., "Programming", "Cloud", "Data", "DevOps", "Soft Skills")
-
-5. **Client** - External clients
-   - name: String
-   - industry: String
-   - revenue: Integer
-   - contract_value: Integer
-
-6. **Document** - Project documentation
-   - doc_id: String (unique)
-   - title: String
-   - content: String
-   - type: String
-   - summary: String
-
-=== RELATIONSHIPS ===
-- (Employee)-[:WORKS_IN]->(Department)
-- (Employee)-[:HAS_SKILL]->(Skill)
-- (Employee)-[:WORKS_ON]->(Project)
-- (Employee)-[:REPORTS_TO]->(Employee)
-- (Project)-[:REQUIRES]->(Skill)
-- (Project)-[:FOR_CLIENT]->(Client)
-- (Project)-[:HAS_DOCUMENT]->(Document)
+=== RELEVANT CONTEXT (FROM VECTOR SEARCH) ===
+Use this information to map vague terms to specific node properties (e.g. if context mentions "Leadership" for "John", search for John when asked about leaders).
+{context}
 
 === STRICT RULES ===
-1. Use ONLY the node labels, relationships, and properties listed above
-2. String comparisons are CASE-SENSITIVE - use exact values as shown
-3. For partial matching on names/titles, use CONTAINS or toLower() for case-insensitive search
-4. Always return meaningful properties, not just nodes
-5. Use OPTIONAL MATCH when relationships might not exist
-6. Return DISTINCT results when appropriate to avoid duplicates
-7. For counting/aggregation, use COUNT(), SUM(), AVG() functions
-8. Use ORDER BY for sorted results and LIMIT for top-N queries
+1. Use ONLY the node labels, relationships, and properties explicitly shown in the DATABASE SCHEMA.
+2. Do not infer properties that are not present in the generated schema.
+3. String comparisons are CASE-SENSITIVE unless using toLower().
+4. Use CONTAINS for partial string matching.
+5. Always return meaningful properties, not just nodes.
+6. Use OPTIONAL MATCH when relationships might not exist.
+7. Return DISTINCT results when appropriate.
+8. Use COUNT(), SUM(), AVG() for aggregations.
+9. Use ORDER BY and LIMIT for ranking.
 
 === CYPHER EXAMPLES ===
 
@@ -217,7 +170,7 @@ Question: {question}
 """
 
 CYPHER_GENERATION_PROMPT = PromptTemplate(
-    input_variables=["schema", "question"], template=CYPHER_GENERATION_TEMPLATE
+    input_variables=["schema", "question", "context"], template=CYPHER_GENERATION_TEMPLATE
 )
 
 
@@ -248,21 +201,26 @@ class QAService:
             raise LLMProviderError(f"Failed to initialize {llm_config['provider']} LLM: {e}") from e
 
     def _get_chain(self) -> GraphCypherQAChain:
-        """Get or create QA chain."""
-        if self._chain is None:
-            # Refresh schema to ensure we have the latest data
-            self.graph.refresh_schema()
+        """Get or create QA chain. Uses caching to avoid rebuilding on every request."""
+        if self._chain is not None:
+            return self._chain
             
-            llm = self._get_llm()
-            self._chain = GraphCypherQAChain.from_llm(
-                llm=llm,
-                graph=self.graph,
-                verbose=settings.debug,
-                allow_dangerous_requests=True,
-                return_intermediate_steps=True,
-                cypher_prompt=CYPHER_GENERATION_PROMPT,
-            )
-            logger.info(f"QA chain initialized with {settings.llm_provider} provider")
+        logger.info("Initializing GraphCypherQAChain...")
+        
+        # Only refresh schema if explicitly requested
+        # self.graph.refresh_schema() 
+        
+        llm = self._get_llm()
+        self._chain = GraphCypherQAChain.from_llm(
+            llm=llm,
+            graph=self.graph,
+            verbose=settings.debug,
+            allow_dangerous_requests=True,
+            return_intermediate_steps=True,
+            cypher_prompt=CYPHER_GENERATION_PROMPT,
+            validate_cypher=True
+        )
+        logger.info(f"QA chain initialized with {settings.llm_provider} provider")
         return self._chain
 
     def query(self, question: str, include_cypher: bool = False) -> Dict[str, Any]:
@@ -280,10 +238,26 @@ class QAService:
             QueryExecutionError: If query execution fails
         """
         try:
+            start_time = time.time()
             chain = self._get_chain()
 
             logger.info(f"Processing query: {question}")
-            result = chain.invoke({"query": question})
+            
+            # --- HYBRID SEARCH: Get context from Vector Store ---
+            try:
+                docs = vector_service.similarity_search(question, k=3)
+                context_text = "\\n".join([f"- {d.page_content}" for d in docs])
+                logger.info(f"Retrieved {len(docs)} context documents")
+            except Exception as e:
+                logger.warning(f"Vector search failed (proceeding without context): {e}")
+                docs = []
+                context_text = "No context available."
+            # ----------------------------------------------------
+
+            result = chain.invoke({"query": question, "context": context_text})
+            
+            end_time = time.time()
+            execution_time_ms = int((end_time - start_time) * 1000)
 
             response = {
                 "question": question,
@@ -295,21 +269,54 @@ class QAService:
                         if settings.llm_provider == "openai"
                         else settings.groq_model
                     ),
+                    "context_used": [d.page_content for d in docs] if docs else [],
+                    "execution_time_ms": execution_time_ms
                 },
             }
 
-            # Extract Cypher query if intermediate steps are available
             if include_cypher and "intermediate_steps" in result and result["intermediate_steps"]:
                 cypher_query = result["intermediate_steps"][0].get("query", "")
                 response["cypher_query"] = cypher_query
                 logger.debug(f"Generated Cypher: {cypher_query}")
 
-            logger.info("Query processed successfully")
+            logger.info(f"Query processed successfully in {execution_time_ms}ms")
             return response
 
+# ... existing code ...
         except Exception as e:
             logger.error(f"Query execution failed: {e}")
             raise QueryExecutionError(f"Failed to execute query: {e}", details={"question": question}) from e
+
+    def refresh_schema(self) -> None:
+        """
+        Refresh the graph schema and invalidate the cached chain.
+        This forces the next query to rebuild the chain with the new schema.
+        """
+        logger.info("Refreshing graph schema...")
+        self.graph.refresh_schema()
+        self._chain = None
+        logger.info("Schema refreshed and chain cache invalidated.")
+
+
+# Global instance for singleton pattern
+_global_qa_service: Optional[QAService] = None
+
+
+def get_qa_service() -> QAService:
+    """
+    Get or create the global QAService instance.
+    This ensures we share the same graph connection and chain cache across requests.
+    """
+    global _global_qa_service
+    if _global_qa_service is None:
+        from src.services.neo4j_service import neo4j_service
+        
+        # Ensure we have a graph connection
+        graph = neo4j_service.get_graph()
+        _global_qa_service = QAService(graph)
+        logger.info("Initialized global QAService instance")
+    
+    return _global_qa_service
 
 
 # Sample questions for testing - based on actual generated data

@@ -36,6 +36,12 @@ class QueryValidationError(Neo4jLangChainException):
     pass
 
 
+class VectorError(Neo4jLangChainException):
+    """Raised when vector operation fails."""
+
+    pass
+
+
 class QueryExecutionError(Neo4jLangChainException):
     """Raised when query execution fails."""
 

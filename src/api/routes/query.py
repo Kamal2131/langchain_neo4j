@@ -17,7 +17,8 @@ from src.api.schemas import (
 from src.core.exceptions import LLMProviderError, QueryExecutionError, QueryValidationError
 from src.core.logging import get_logger
 from src.services.neo4j_service import neo4j_service
-from src.services.qa_service import SAMPLE_QUESTIONS, QAService
+from src.services.qa_service import SAMPLE_QUESTIONS, get_qa_service
+
 from src.services.celery_service import (
     process_query_task,
     get_task_status as get_celery_task_status,
@@ -27,7 +28,6 @@ from src.services.celery_service import (
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/query", tags=["Query"])
-
 
 @router.post(
     "",
@@ -55,11 +55,8 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         HTTPException: If query processing fails
     """
     try:
-        # Get Neo4j graph
-        graph = neo4j_service.get_graph()
-
-        # Create QA service
-        qa_service = QAService(graph)
+        # Get singleton QA service instance
+        qa_service = get_qa_service()
 
         # Process query
         result = qa_service.query(question=request.question, include_cypher=request.include_cypher)
