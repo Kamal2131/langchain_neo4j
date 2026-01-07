@@ -7,6 +7,7 @@ import type {
     QueryRequest,
     QueryResponse,
     HealthResponse,
+    SchemaResponse,
 } from '@/types/api';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1';
@@ -40,7 +41,7 @@ api.interceptors.response.use(
 // Health & Info
 export const healthApi = {
     getHealth: () => api.get<HealthResponse>('/health'),
-    getSchema: () => api.get<HealthResponse>('/health/schema'),
+    getSchema: () => api.get<SchemaResponse>('/health/schema'),
 };
 
 // Natural Language Query

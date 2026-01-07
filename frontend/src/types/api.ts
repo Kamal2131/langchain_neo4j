@@ -54,11 +54,19 @@ export interface QueryResponse {
 export interface HealthResponse {
     status: string;
     neo4j_connected: boolean;
-    neo4j_status?: string;
-    schema?: {
-        total_nodes: number;
-        total_relationships: number;
-        node_labels: Record<string, number>;
-        relationship_types: Record<string, number>;
+    details?: {
+        environment?: string;
+        version?: string;
+        llm_provider?: string;
+        redis_connected?: boolean;
+        celery_workers?: number;
+        celery_healthy?: boolean;
     };
+}
+
+export interface SchemaResponse {
+    nodes: Record<string, number>;
+    relationships: Record<string, number>;
+    total_nodes: number;
+    total_relationships: number;
 }

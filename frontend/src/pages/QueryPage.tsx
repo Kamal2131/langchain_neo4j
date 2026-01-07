@@ -202,7 +202,7 @@ export function QueryPage() {
                         </p>
                     ) : (
                         <div className="grid gap-2">
-                            {sampleQuestions.slice(0, 6).map((sample, idx) => (
+                            {sampleQuestions.slice(0, 15).map((sample, idx) => (
                                 <Button
                                     key={idx}
                                     variant="ghost"
