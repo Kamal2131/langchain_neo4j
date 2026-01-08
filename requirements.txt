@@ -13,3 +13,5 @@ langchain-huggingface>=0.1.0
 sentence-transformers>=3.0.0
 celery>=5.3.6
 redis>=5.0.1
+pypdf>=4.0.0
+langchain-experimental>=0.0.40
