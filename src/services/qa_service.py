@@ -163,6 +163,38 @@ RETURN e.name, e.title, e.department, e.level, e.location
 ORDER BY e.name
 LIMIT 50
 
+-- Contracts for a specific client --
+Question: What contracts do we have with Acme Corporation?
+MATCH (c:Contract)-[:FOR_CLIENT]->(cl:Client)
+WHERE toLower(cl.name) CONTAINS toLower("Acme")
+RETURN c.title, c.type, c.status, c.value, c.start_date, c.end_date, cl.name
+
+-- Contract managers --
+Question: Who manages our contracts with TechStartup?
+MATCH (c:Contract)-[:FOR_CLIENT]->(cl:Client)
+WHERE toLower(cl.name) CONTAINS toLower("TechStartup")
+MATCH (c)-[:MANAGED_BY]->(e:Employee)
+RETURN c.title, e.name as manager_name, e.title as manager_title, e.department
+
+-- All active contracts --
+Question: Show me all active contracts
+MATCH (c:Contract)
+WHERE c.status = "active"
+RETURN c.title, c.type, c.value, c.start_date, c.end_date
+ORDER BY c.value DESC
+
+-- Policies for a department --
+Question: What policies apply to Engineering?
+MATCH (p:Policy)-[:APPLIES_TO]->(d:Department {{name: "Engineering"}})
+RETURN p.title, p.type, p.effective_date, p.status
+
+-- Contracts over a certain value --
+Question: Show contracts worth over $50K
+MATCH (c:Contract)
+WHERE c.value > 50000
+RETURN c.title, c.value, c.status
+ORDER BY c.value DESC
+
 === YOUR TASK ===
 Generate ONLY the Cypher query for the following question. Do not include any explanations.
 

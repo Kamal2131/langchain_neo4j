@@ -1,0 +1,82 @@
+// Title
+title Enterprise Knowledge Assistant Architecture
+
+// Frontend
+Frontend [icon: react] {
+  UI [icon: monitor, label: "User Interface"]
+  QueryPage [icon: search, label: "Query Page (Hybrid Results)"]
+  AdminPage [icon: file-text, label: "Admin Page (PDF Ingestion)"]
+}
+
+// Backend
+Backend [icon: python, label: "FastAPI Backend"] {
+  APIRouter [icon: server, label: "API Router"]
+
+  Services [icon: cog] {
+    QAService [icon: help-circle, label: "QAService (Orchestrator)"]
+    VectorService [icon: database, label: "VectorService"]
+    IngestionService [icon: download, label: "IngestionService"]
+    CeleryWorker [icon: clock, label: "Celery Worker (Async Tasks)"]
+  }
+
+  GraphRAGFlow [icon: layers, label: "GraphRAG Flow"] {
+    LLMSynthesis [icon: openai, label: "LLM Synthesis (Groq/OpenAI)"]
+    GraphCypherQAChain [icon: code, label: "GraphCypherQAChain"]
+  }
+
+  PyPDFLoader [icon: file-text, label: "PyPDFLoader"]
+  LLMGraphTransformer [icon: code, label: "LLMGraphTransformer"]
+}
+
+// Data Layer
+DataLayer [icon: database, label: "Data Layer"] {
+  Neo4jGraphDB [icon: neo4j, label: "Neo4j Graph DB"]
+  VectorIndex [icon: database, label: "Vector Index (inside Neo4j)"]
+  RedisCache [icon: redis, label: "Redis Broker/Cache"]
+}
+
+// External Integrations
+ExternalIntegrations [icon: globe, label: "External Integrations"] {
+  AuthProvider [icon: lock, label: "Auth Provider"]
+  ExternalLLM [icon: openai, label: "External LLM APIs"]
+  DocumentStorage [icon: aws-s3, label: "Document Storage"]
+  Observability [icon: chart-bar, label: "Monitoring/Observability"]
+}
+
+// Connections
+UI > APIRouter: "Natural Language Question"
+UI > APIRouter: "Upload PDF"
+
+APIRouter > QAService: "/query"
+QAService > VectorService: "1. Similarity Search"
+
+QAService > GraphCypherQAChain: "2. Generate Cypher"
+GraphCypherQAChain > Neo4jGraphDB: "Query Graph"
+
+QAService > LLMSynthesis: "3. Synthesize"
+VectorService > LLMSynthesis: "Docs"
+GraphCypherQAChain > LLMSynthesis: "Structured Data"
+
+APIRouter > IngestionService: "/admin/ingest"
+IngestionService > PyPDFLoader: "Extract Text"
+IngestionService > LLMGraphTransformer: "Extract Graph"
+LLMGraphTransformer > Neo4jGraphDB: "Write Nodes/Rels"
+LLMGraphTransformer > VectorIndex: "Compute Embeddings"
+
+APIRouter > RedisCache: "/query/async"
+CeleryWorker > QAService: "Execute"
+
+LLMSynthesis > ExternalLLM: "API call"
+APIRouter > AuthProvider: "Authorize"
+APIRouter > DocumentStorage: "Store PDF"
+IngestionService > DocumentStorage: "Retrieve PDF"
+
+APIRouter --> Observability: "metrics"
+QAService --> Observability: "metrics"
+IngestionService --> Observability: "metrics"
+CeleryWorker --> Observability: "metrics"
+Neo4jGraphDB --> Observability: "metrics"
+RedisCache --> Observability: "metrics"
+Services > DataLayer: "Retrieve Context"
+DataLayer > Services: "Process Job"
+UI < LLMSynthesis: "Final Answer"

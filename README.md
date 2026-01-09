@@ -14,7 +14,27 @@ The AI translates your questions into Cypher queries, executes them on Neo4j, an
 
 ## 🏗️ Architecture
 
-![Architecture Diagram](docs/images/architecture_diagram.png)
+### System Architecture (Enhanced GraphRAG)
+
+![Enhanced Architecture](docs/images/architecture_diagram2.png)
+
+The system now features **Hybrid Search (GraphRAG)** combining:
+- **Structured Retrieval**: Cypher queries on Neo4j graph
+- **Unstructured Retrieval**: Vector search on document embeddings
+- **LLM Synthesis**: Combining both sources for comprehensive answers
+
+**Key Components**:
+- **Frontend**: React UI with hybrid results visualization
+- **Backend**: FastAPI with QAService orchestrating parallel retrieval
+- **Data Layer**: Neo4j (graph + vector index), Redis (task queue)
+- **Document Linking**: Contracts, Policies linked to Clients/Departments
+- **External Integrations**: LLM APIs (Groq/OpenAI), Auth, Storage, Observability
+
+<details>
+<summary>📊 Original Architecture Diagram</summary>
+
+![Original Architecture](docs/images/architecture_diagram.png)
+</details>
 
 ## ✨ Features
 
