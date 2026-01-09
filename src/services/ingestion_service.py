@@ -25,7 +25,7 @@ class IngestionService:
     def __init__(self):
         self.graph = neo4j_service.get_graph()
         self.llm = self._get_llm()
-        self.transformer = LLMGraphTransformer(llm=self.llm)
+        self.transformer = None
 
     def _get_llm(self):
         """Get LLM instance for extraction."""
@@ -72,6 +72,18 @@ class IngestionService:
             total_relationships = 0
             
             logger.info("Extracting graph data using LLM...")
+            
+            if not self.transformer:
+                try:
+                    self.transformer = LLMGraphTransformer(llm=self.llm)
+                except NotImplementedError as e:
+                    # Fallback or error if LLM provider doesn't support structured output
+                    logger.error(f"LLM graph transformation failed to initialize: {e}")
+                    raise NotImplementedError(
+                        "The configured LLM provider does not support structured output required for graph extraction. "
+                        "Please use OpenAI or a supported model."
+                    ) from e
+
             graph_documents = self.transformer.convert_to_graph_documents(documents)
             
             # 3. Write to Neo4j

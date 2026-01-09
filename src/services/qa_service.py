@@ -3,14 +3,14 @@ QA service for natural language query processing.
 """
 
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 from langchain.chains import GraphCypherQAChain
 from langchain_community.graphs import Neo4jGraph
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
-
+from langchain_core.documents import Document
 from src.core.config import settings
 from src.core.exceptions import LLMProviderError, QueryExecutionError
 from src.core.logging import get_logger
@@ -173,9 +173,31 @@ CYPHER_GENERATION_PROMPT = PromptTemplate(
     input_variables=["schema", "question", "context"], template=CYPHER_GENERATION_TEMPLATE
 )
 
+HYBRID_SYNTHESIS_TEMPLATE = """Task: Answer the user's question by combining information from the Database (Structured Data) and the Document Store (Unstructured Context).
+
+=== QUESTION ===
+{question}
+
+=== STRUCTURED FACTS (From Graph Database) ===
+{structured_data}
+
+=== UNSTRUCTURED CONTEXT (From Documents) ===
+{context_docs}
+
+=== INSTRUCTIONS ===
+1. Synthesize the answer using BOTH sources.
+2. If the Structured Facts provide specific data (lists, counts, names), include them.
+3. If the Unstructured Context provides policies, definitions, or descriptive details, explain them.
+4. If there is a conflict, note it, but prefer the official policy (Unstructured) for rules and Database (Structured) for current stats.
+5. Provide a cohesive, professional response.
+"""
+
+HYBRID_SYNTHESIS_PROMPT = PromptTemplate(
+    input_variables=["question", "structured_data", "context_docs"], template=HYBRID_SYNTHESIS_TEMPLATE
+)
 
 class QAService:
-    """Service for processing natural language queries."""
+    """Service for processing natural language queries using GraphRAG (Hybrid Retrieval)."""
 
     def __init__(self, graph: Neo4jGraph) -> None:
         self.graph = graph
@@ -201,14 +223,11 @@ class QAService:
             raise LLMProviderError(f"Failed to initialize {llm_config['provider']} LLM: {e}") from e
 
     def _get_chain(self) -> GraphCypherQAChain:
-        """Get or create QA chain. Uses caching to avoid rebuilding on every request."""
+        """Get or create QA chain (Structured Retriever)."""
         if self._chain is not None:
             return self._chain
             
         logger.info("Initializing GraphCypherQAChain...")
-        
-        # Only refresh schema if explicitly requested
-        # self.graph.refresh_schema() 
         
         llm = self._get_llm()
         self._chain = GraphCypherQAChain.from_llm(
@@ -223,9 +242,32 @@ class QAService:
         logger.info(f"QA chain initialized with {settings.llm_provider} provider")
         return self._chain
 
+    def _synthesize_answer(self, question: str, structured_data: str, context_docs: List[Document]) -> str:
+        """Combine structured and unstructured data into a final answer."""
+        try:
+            llm = self._get_llm()
+            
+            # Format context documents
+            formatted_docs = "\n".join([f"- {d.page_content}" for d in context_docs])
+            if not formatted_docs:
+                formatted_docs = "No relevant document context found."
+
+            prompt = HYBRID_SYNTHESIS_PROMPT.format(
+                question=question,
+                structured_data=structured_data,
+                context_docs=formatted_docs
+            )
+            
+            response = llm.invoke(prompt)
+            return response.content
+            
+        except Exception as e:
+            logger.error(f"Synthesis failed: {e}")
+            return f"Error synthesizing answer: {e}. Structured Data: {structured_data}"
+
     def query(self, question: str, include_cypher: bool = False) -> Dict[str, Any]:
         """
-        Process a natural language query.
+        Process a natural language query using Hybrid Retrieval.
 
         Args:
             question: Natural language question
@@ -233,9 +275,6 @@ class QAService:
 
         Returns:
             dict: Query result with answer and optional Cypher query
-
-        Raises:
-            QueryExecutionError: If query execution fails
         """
         try:
             start_time = time.time()
@@ -243,25 +282,50 @@ class QAService:
 
             logger.info(f"Processing query: {question}")
             
-            # --- HYBRID SEARCH: Get context from Vector Store ---
+            # --- PARALLEL RETRIEVAL ---
+            
+            # 1. Unstructured Retrieval (Vector Store)
             try:
+                # Get more broad context for the synthesis layer
                 docs = vector_service.similarity_search(question, k=3)
-                context_text = "\\n".join([f"- {d.page_content}" for d in docs])
                 logger.info(f"Retrieved {len(docs)} context documents")
             except Exception as e:
-                logger.warning(f"Vector search failed (proceeding without context): {e}")
+                logger.warning(f"Vector search failed: {e}")
                 docs = []
-                context_text = "No context available."
-            # ----------------------------------------------------
 
-            result = chain.invoke({"query": question, "context": context_text})
+            # 2. Structured Retrieval (Graph Database)
+            # We use the existing chain, but we treat its output as "Structured Facts"
+            # We inject the docs into the chain's context to help it generate better Cypher if needed 
+            # (though mainly we want the data it returns)
+            
+            chain_context = "\n".join([f"- {d.page_content}" for d in docs])
+            if not chain_context:
+                chain_context = "No additional context available."
+
+            graph_result = chain.invoke({"query": question, "context": chain_context})
+            
+            structured_data = graph_result.get("result", "No data found in graph.")
+            cypher_query = ""
+            
+            if "intermediate_steps" in graph_result and graph_result["intermediate_steps"]:
+                steps = graph_result["intermediate_steps"]
+                # intermediate_steps is a list of (query, context) tuples or dicts depending on version
+                # In standard LangChain: keys are 'query' and 'context'
+                if len(steps) > 0 and isinstance(steps[0], dict):
+                     cypher_query = steps[0].get("query", "")
+
+            # 3. Synthesis
+            # If the graph returned a direct "I don't know" or empty, we still want to check the docs.
+            # But the synthesis prompt handles combining them.
+            
+            final_answer = self._synthesize_answer(question, structured_data, docs)
             
             end_time = time.time()
             execution_time_ms = int((end_time - start_time) * 1000)
 
             response = {
                 "question": question,
-                "answer": result.get("result", "No answer found"),
+                "answer": final_answer,
                 "metadata": {
                     "provider": settings.llm_provider,
                     "model": (
@@ -270,19 +334,18 @@ class QAService:
                         else settings.groq_model
                     ),
                     "context_used": [d.page_content for d in docs] if docs else [],
-                    "execution_time_ms": execution_time_ms
+                    "execution_time_ms": execution_time_ms,
+                    "structured_source": structured_data
                 },
             }
 
-            if include_cypher and "intermediate_steps" in result and result["intermediate_steps"]:
-                cypher_query = result["intermediate_steps"][0].get("query", "")
+            if include_cypher and cypher_query:
                 response["cypher_query"] = cypher_query
                 logger.debug(f"Generated Cypher: {cypher_query}")
 
             logger.info(f"Query processed successfully in {execution_time_ms}ms")
             return response
 
-# ... existing code ...
         except Exception as e:
             logger.error(f"Query execution failed: {e}")
             raise QueryExecutionError(f"Failed to execute query: {e}", details={"question": question}) from e

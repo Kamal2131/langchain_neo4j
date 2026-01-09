@@ -176,6 +176,38 @@ export function QueryPage() {
                                 </pre>
                             </div>
                         )}
+
+                        <div className="mt-6 grid gap-4 md:grid-cols-2">
+                            {/* Structured Source */}
+                            <div className="p-4 bg-purple-50 dark:bg-purple-950/20 rounded-lg border border-purple-100 dark:border-purple-900">
+                                <h4 className="font-semibold text-sm text-purple-900 dark:text-purple-100 mb-2 flex items-center gap-2">
+                                    <Zap className="h-4 w-4" /> Structured Source (Graph)
+                                </h4>
+                                <div className="text-xs text-muted-foreground max-h-40 overflow-y-auto whitespace-pre-wrap font-mono bg-white dark:bg-black p-2 rounded border">
+                                    {typeof result.metadata?.structured_source === 'string' 
+                                        ? result.metadata.structured_source 
+                                        : JSON.stringify(result.metadata?.structured_source, null, 2) || "No structured data used."}
+                                </div>
+                            </div>
+                            
+                            {/* Unstructured Source */}
+                            <div className="p-4 bg-pink-50 dark:bg-pink-950/20 rounded-lg border border-pink-100 dark:border-pink-900">
+                                <h4 className="font-semibold text-sm text-pink-900 dark:text-pink-100 mb-2 flex items-center gap-2">
+                                    <Sparkles className="h-4 w-4" /> Unstructured Context (Docs)
+                                </h4>
+                                <div className="text-xs text-muted-foreground max-h-40 overflow-y-auto bg-white dark:bg-black p-2 rounded border">
+                                    {result.metadata?.context_used && result.metadata.context_used.length > 0 ? (
+                                        <ul className="list-disc list-inside space-y-1">
+                                            {result.metadata.context_used.map((doc: string, i: number) => (
+                                                <li key={i}>{doc.substring(0, 150)}...</li>
+                                            ))}
+                                        </ul>
+                                    ) : (
+                                        "No documents retrieved."
+                                    )}
+                                </div>
+                            </div>
+                        </div>
                     </CardContent>
                 </Card>
             )}
