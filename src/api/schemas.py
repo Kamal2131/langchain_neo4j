@@ -2,7 +2,7 @@
 Pydantic schemas for request/response validation.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -22,11 +22,21 @@ class QueryRequest(BaseModel):
     )
 
 
+class ConfidenceScore(BaseModel):
+    """Confidence assessment for query responses."""
+    
+    level: str = Field(..., description="Confidence level: high, medium, or low")
+    score: int = Field(..., ge=0, le=100, description="Confidence score (0-100)")
+    max_score: int = Field(default=100, description="Maximum possible score")
+    reasons: List[str] = Field(default_factory=list, description="Reasons for the confidence score")
+
+
 class QueryResponse(BaseModel):
     """Response model for query results."""
 
     question: str = Field(..., description="Original question")
     answer: str = Field(..., description="Answer to the question")
+    confidence: Optional[ConfidenceScore] = Field(None, description="Confidence assessment")
     cypher_query: Optional[str] = Field(None, description="Generated Cypher query")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Query metadata")
 

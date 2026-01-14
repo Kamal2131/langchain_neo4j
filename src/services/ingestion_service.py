@@ -1,6 +1,7 @@
 """
 Service for ingesting unstructured data (PDFs) into the Neo4j graph.
 Uses LLM to extract nodes and relationships with specialized handling for different document types.
+Enhanced with semantic chunking for better retrieval quality.
 """
 
 import os
@@ -10,9 +11,12 @@ from datetime import datetime
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_experimental.graph_transformers import LLMGraphTransformer
+from langchain_experimental.text_splitter import SemanticChunker
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from langchain_openai import ChatOpenAI
 from langchain_groq import ChatGroq
+from langchain_huggingface import HuggingFaceEmbeddings
 
 from src.core.config import settings
 from src.core.logging import get_logger
@@ -68,12 +72,15 @@ If any field is not found, use null or empty list. Ensure valid JSON format.
 
 
 class IngestionService:
-    """Service for processing and ingesting documents with type-aware extraction."""
+    """Service for processing and ingesting documents with type-aware extraction and semantic chunking."""
 
     def __init__(self):
         self.graph = neo4j_service.get_graph()
         self.llm = self._get_llm()
         self.transformer = None
+        self._embeddings = None
+        self._semantic_chunker = None
+        self._fallback_chunker = None
 
     def _get_llm(self):
         """Get LLM instance for extraction."""
@@ -93,6 +100,74 @@ class IngestionService:
         else:
             raise ValueError(f"Unsupported LLM provider: {llm_config['provider']}")
 
+    def _get_embeddings(self) -> HuggingFaceEmbeddings:
+        """Get or initialize embeddings model for semantic chunking."""
+        if self._embeddings is None:
+            logger.info(f"Initializing embeddings for chunking: {settings.embedding_model}")
+            self._embeddings = HuggingFaceEmbeddings(
+                model_name=settings.embedding_model
+            )
+        return self._embeddings
+
+    def _get_semantic_chunker(self) -> SemanticChunker:
+        """Get or initialize semantic chunker."""
+        if self._semantic_chunker is None:
+            logger.info("Initializing SemanticChunker...")
+            self._semantic_chunker = SemanticChunker(
+                embeddings=self._get_embeddings(),
+                breakpoint_threshold_type="percentile",
+                breakpoint_threshold_amount=95  # Split when semantic similarity drops significantly
+            )
+        return self._semantic_chunker
+
+    def _get_fallback_chunker(self) -> RecursiveCharacterTextSplitter:
+        """Get or initialize fallback chunker."""
+        if self._fallback_chunker is None:
+            logger.info(f"Initializing fallback chunker (size={settings.chunk_size}, overlap={settings.chunk_overlap})")
+            self._fallback_chunker = RecursiveCharacterTextSplitter(
+                chunk_size=settings.chunk_size,
+                chunk_overlap=settings.chunk_overlap,
+                separators=["\n\n", "\n", ".", "!", "?", ",", " "],
+                length_function=len
+            )
+        return self._fallback_chunker
+
+    def _chunk_documents(self, documents: List[Document]) -> List[Document]:
+        """
+        Split documents into semantic chunks with fallback to recursive splitting.
+        
+        Args:
+            documents: List of documents to chunk
+            
+        Returns:
+            List[Document]: Chunked documents
+        """
+        if not documents:
+            return documents
+        
+        original_count = len(documents)
+        
+        try:
+            # Try semantic chunking first
+            chunker = self._get_semantic_chunker()
+            chunks = chunker.split_documents(documents)
+            logger.info(f"✅ Semantic chunking: {original_count} docs → {len(chunks)} chunks")
+            return chunks
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Semantic chunking failed: {e}, using fallback RecursiveCharacterTextSplitter")
+            
+            try:
+                chunker = self._get_fallback_chunker()
+                chunks = chunker.split_documents(documents)
+                logger.info(f"✅ Fallback chunking: {original_count} docs → {len(chunks)} chunks")
+                return chunks
+                
+            except Exception as fallback_error:
+                logger.error(f"❌ Fallback chunking also failed: {fallback_error}")
+                # Return original documents if all chunking fails
+                return documents
+
     async def _classify_document(self, documents: List[Document]) -> str:
         """Classify document type using LLM."""
         # Take first 2000 characters for classification
@@ -109,7 +184,10 @@ class IngestionService:
         """Extract Contract node and link to Client."""
         logger.info("Processing as contract document...")
         
-        # Combine all pages
+        # Chunk documents for better embedding later
+        chunks = self._chunk_documents(documents)
+        
+        # Combine all pages for extraction (use original for full context)
         full_text = "\n\n".join([d.page_content for d in documents])
         
         # Extract contract information
@@ -131,7 +209,7 @@ class IngestionService:
         # Generate unique ID
         contract_id = str(uuid.uuid4())
         
-        # Create Contract node
+        # Create Contract node with chunked text for embedding
         contract_query = """
         CREATE (c:Contract {
             id: $id,
@@ -143,10 +221,14 @@ class IngestionService:
             status: $status,
             terms: $terms,
             text: $text,
+            chunk_count: $chunk_count,
             created_at: datetime()
         })
         RETURN c
         """
+        
+        # Store chunked text for better vector search
+        chunked_text = "\n---\n".join([c.page_content for c in chunks[:5]])  # First 5 chunks
         
         self.graph.query(contract_query, {
             "id": contract_id,
@@ -157,7 +239,8 @@ class IngestionService:
             "value": contract_data.get("value", 0.0),
             "status": "active",
             "terms": contract_data.get("key_terms", ""),
-            "text": full_text[:1000]  # Store excerpt
+            "text": chunked_text[:2000],  # Store more context
+            "chunk_count": len(chunks)
         })
         
         # Link to Client if specified
@@ -185,12 +268,16 @@ class IngestionService:
             "document_type": "contract",
             "contract_id": contract_id,
             "title": contract_data.get("title"),
-            "linked_client": client_name
+            "linked_client": client_name,
+            "chunks_created": len(chunks)
         }
 
     async def _process_policy(self, documents: List[Document], metadata: Dict) -> dict:
         """Extract Policy node and link to Departments."""
         logger.info("Processing as policy document...")
+        
+        # Chunk documents
+        chunks = self._chunk_documents(documents)
         
         full_text = "\n\n".join([d.page_content for d in documents])
         
@@ -211,6 +298,9 @@ class IngestionService:
         
         policy_id = str(uuid.uuid4())
         
+        # Store chunked text for better embedding
+        chunked_text = "\n---\n".join([c.page_content for c in chunks[:5]])
+        
         # Create Policy node
         policy_query = """
         CREATE (p:Policy {
@@ -221,6 +311,7 @@ class IngestionService:
             version: '1.0',
             status: 'active',
             text: $text,
+            chunk_count: $chunk_count,
             created_at: datetime()
         })
         RETURN p
@@ -231,7 +322,8 @@ class IngestionService:
             "title": policy_data.get("title", "Untitled"),
             "type": policy_data.get("policy_type", "General"),
             "effective_date": policy_data.get("effective_date", "2024-01-01"),
-            "text": full_text[:1000]
+            "text": chunked_text[:2000],
+            "chunk_count": len(chunks)
         })
         
         # Link to Departments
@@ -262,12 +354,16 @@ class IngestionService:
             "document_type": "policy",
             "policy_id": policy_id,
             "title": policy_data.get("title"),
-            "linked_departments": linked_depts
+            "linked_departments": linked_depts,
+            "chunks_created": len(chunks)
         }
 
     async def _process_general_document(self, documents: List[Document], metadata: Dict) -> dict:
-        """Process general document using existing LLMGraphTransformer."""
+        """Process general document using existing LLMGraphTransformer with chunking."""
         logger.info("Processing as general document...")
+        
+        # Chunk documents before processing
+        chunks = self._chunk_documents(documents)
         
         # Use existing generic extraction
         if not self.transformer:
@@ -280,7 +376,7 @@ class IngestionService:
                     "Please use OpenAI or a supported model."
                 ) from e
 
-        graph_documents = self.transformer.convert_to_graph_documents(documents)
+        graph_documents = self.transformer.convert_to_graph_documents(chunks)
         
         # Write to Neo4j
         self.graph.add_graph_documents(graph_documents)
@@ -293,12 +389,13 @@ class IngestionService:
             "document_type": "general",
             "nodes_created": total_nodes,
             "relationships_created": total_relationships,
-            "pages_processed": len(documents)
+            "pages_processed": len(documents),
+            "chunks_created": len(chunks)
         }
 
     async def process_pdf(self, file_path: str, metadata: Dict = None) -> dict:
         """
-        Enhanced PDF processing with document type awareness.
+        Enhanced PDF processing with document type awareness and semantic chunking.
         
         Args:
             file_path: Path to PDF
@@ -320,7 +417,7 @@ class IngestionService:
             # 2. Classify document type
             doc_type = metadata.get("doc_type") or await self._classify_document(documents)
             
-            # 3. Route to specialized processor
+            # 3. Route to specialized processor (chunking happens inside each processor)
             if doc_type == "contract":
                 result = await self._process_contract(documents, metadata)
             elif doc_type == "policy":
@@ -338,4 +435,3 @@ class IngestionService:
 
 # Global instance
 ingestion_service = IngestionService()
-

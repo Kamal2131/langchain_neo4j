@@ -5,7 +5,7 @@ QA service for natural language query processing.
 import time
 from typing import Any, Dict, Optional, List
 
-from langchain.chains import GraphCypherQAChain
+from langchain_community.chains.graph_qa.cypher import GraphCypherQAChain
 from langchain_community.graphs import Neo4jGraph
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
@@ -228,12 +228,32 @@ HYBRID_SYNTHESIS_PROMPT = PromptTemplate(
     input_variables=["question", "structured_data", "context_docs"], template=HYBRID_SYNTHESIS_TEMPLATE
 )
 
+# Query Expansion Template - rewrites vague queries for better retrieval
+QUERY_EXPANSION_TEMPLATE = """You are a query rewriter for a company knowledge base.
+Rewrite the following question to be more specific and search-friendly.
+
+Rules:
+1. Expand abbreviations (e.g., "devs" -> "developers", "eng" -> "Engineering")
+2. Add synonyms for key terms (e.g., "Python experts" -> "employees with Python skills")
+3. Make implicit entities explicit (e.g., "our team" -> "employees")
+4. Keep the rewritten query concise (under 30 words)
+5. Preserve the original intent
+
+Original Question: {question}
+
+Rewritten Query (respond with ONLY the rewritten query, no explanation):"""
+
+QUERY_EXPANSION_PROMPT = PromptTemplate(
+    input_variables=["question"], template=QUERY_EXPANSION_TEMPLATE
+)
+
 class QAService:
     """Service for processing natural language queries using GraphRAG (Hybrid Retrieval)."""
 
     def __init__(self, graph: Neo4jGraph) -> None:
         self.graph = graph
         self._chain: Optional[GraphCypherQAChain] = None
+        self._enable_query_expansion: bool = True  # Can be toggled
 
     def _get_llm(self) -> Any:
         """Get LLM instance based on configured provider."""
@@ -273,6 +293,123 @@ class QAService:
         )
         logger.info(f"QA chain initialized with {settings.llm_provider} provider")
         return self._chain
+
+    def _expand_query(self, question: str) -> str:
+        """
+        Expand/rewrite a vague query into a more specific search query.
+        
+        Args:
+            question: Original user question
+            
+        Returns:
+            str: Expanded query optimized for retrieval
+        """
+        if not self._enable_query_expansion:
+            return question
+            
+        try:
+            llm = self._get_llm()
+            prompt = QUERY_EXPANSION_PROMPT.format(question=question)
+            response = llm.invoke(prompt)
+            expanded = response.content.strip()
+            
+            # Validate the expansion isn't empty or too different
+            if expanded and len(expanded) > 5:
+                logger.info(f"Query expanded: '{question}' -> '{expanded}'")
+                return expanded
+            else:
+                logger.warning(f"Query expansion returned invalid result, using original")
+                return question
+                
+        except Exception as e:
+            logger.warning(f"Query expansion failed: {e}, using original query")
+            return question
+
+    def _calculate_confidence(
+        self, 
+        docs: List[Document], 
+        structured_data: str, 
+        final_answer: str
+    ) -> Dict[str, Any]:
+        """
+        Calculate confidence score based on retrieval quality and answer characteristics.
+        
+        Args:
+            docs: Retrieved context documents
+            structured_data: Data from graph database
+            final_answer: The synthesized answer
+            
+        Returns:
+            dict: Confidence level (high/medium/low) with score and reasons
+        """
+        score = 0
+        reasons = []
+        
+        # Factor 1: Number of context documents (max 30 points)
+        doc_count = len(docs)
+        if doc_count >= 3:
+            score += 30
+            reasons.append(f"{doc_count} relevant documents found")
+        elif doc_count >= 1:
+            score += 15
+            reasons.append(f"Only {doc_count} document(s) found")
+        else:
+            reasons.append("No context documents found")
+        
+        # Factor 2: Structured data quality (max 40 points)
+        no_data_phrases = [
+            "no data", "not found", "i don't know", "cannot find",
+            "no results", "empty", "no information", "unable to"
+        ]
+        structured_lower = structured_data.lower()
+        
+        if any(phrase in structured_lower for phrase in no_data_phrases):
+            reasons.append("Graph database returned no matching data")
+        elif len(structured_data) > 100:
+            score += 40
+            reasons.append("Rich structured data from graph")
+        elif len(structured_data) > 20:
+            score += 25
+            reasons.append("Some structured data from graph")
+        else:
+            score += 10
+            reasons.append("Limited structured data")
+        
+        # Factor 3: Answer quality indicators (max 30 points)
+        uncertain_phrases = [
+            "i'm not sure", "might be", "could be", "possibly",
+            "i don't have", "no information", "cannot determine"
+        ]
+        answer_lower = final_answer.lower()
+        
+        if any(phrase in answer_lower for phrase in uncertain_phrases):
+            reasons.append("Answer contains uncertainty indicators")
+        elif len(final_answer) > 200:
+            score += 30
+            reasons.append("Comprehensive answer generated")
+        elif len(final_answer) > 50:
+            score += 20
+            reasons.append("Adequate answer length")
+        else:
+            score += 10
+            reasons.append("Brief answer")
+        
+        # Determine confidence level
+        if score >= 70:
+            level = "high"
+        elif score >= 40:
+            level = "medium"
+        else:
+            level = "low"
+        
+        logger.debug(f"Confidence: {level} (score: {score}, reasons: {reasons})")
+        
+        return {
+            "level": level,
+            "score": score,
+            "max_score": 100,
+            "reasons": reasons
+        }
 
     def _synthesize_answer(self, question: str, structured_data: str, context_docs: List[Document]) -> str:
         """Combine structured and unstructured data into a final answer."""
@@ -314,12 +451,16 @@ class QAService:
 
             logger.info(f"Processing query: {question}")
             
+            # --- QUERY EXPANSION ---
+            # Rewrite vague queries for better retrieval
+            expanded_query = self._expand_query(question)
+            
             # --- PARALLEL RETRIEVAL ---
             
-            # 1. Unstructured Retrieval (Vector Store)
+            # 1. Unstructured Retrieval (Vector Store) - use expanded query
             try:
                 # Get more broad context for the synthesis layer
-                docs = vector_service.similarity_search(question, k=3)
+                docs = vector_service.similarity_search(expanded_query, k=3)
                 logger.info(f"Retrieved {len(docs)} context documents")
             except Exception as e:
                 logger.warning(f"Vector search failed: {e}")
@@ -352,12 +493,16 @@ class QAService:
             
             final_answer = self._synthesize_answer(question, structured_data, docs)
             
+            # --- CONFIDENCE SCORING ---
+            confidence = self._calculate_confidence(docs, structured_data, final_answer)
+            
             end_time = time.time()
             execution_time_ms = int((end_time - start_time) * 1000)
 
             response = {
                 "question": question,
                 "answer": final_answer,
+                "confidence": confidence,  # NEW: Confidence assessment
                 "metadata": {
                     "provider": settings.llm_provider,
                     "model": (
@@ -365,6 +510,7 @@ class QAService:
                         if settings.llm_provider == "openai"
                         else settings.groq_model
                     ),
+                    "expanded_query": expanded_query if expanded_query != question else None,
                     "context_used": [d.page_content for d in docs] if docs else [],
                     "execution_time_ms": execution_time_ms,
                     "structured_source": structured_data

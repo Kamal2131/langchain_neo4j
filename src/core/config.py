@@ -85,6 +85,28 @@ class Settings(BaseSettings):
         alias="CELERY_TASK_TIMEOUT",
         description="Celery task timeout in seconds"
     )
+    
+    # Vector Search Configuration
+    embedding_model: str = Field(
+        default="all-mpnet-base-v2",
+        alias="EMBEDDING_MODEL",
+        description="HuggingFace embedding model name (all-mpnet-base-v2 = 768 dims, higher quality)"
+    )
+    search_type: Literal["vector", "hybrid", "keyword"] = Field(
+        default="hybrid",
+        alias="SEARCH_TYPE",
+        description="Search type: vector (semantic only), hybrid (vector + BM25), keyword (BM25 only)"
+    )
+    chunk_size: int = Field(
+        default=512,
+        alias="CHUNK_SIZE",
+        description="Target chunk size for document splitting"
+    )
+    chunk_overlap: int = Field(
+        default=50,
+        alias="CHUNK_OVERLAP",
+        description="Overlap between chunks to maintain context"
+    )
 
     @field_validator("llm_provider")
     @classmethod
