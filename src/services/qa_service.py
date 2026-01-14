@@ -3,7 +3,9 @@ QA service for natural language query processing.
 """
 
 import time
+import hashlib
 from typing import Any, Dict, Optional, List
+from collections import OrderedDict
 
 from langchain_community.chains.graph_qa.cypher import GraphCypherQAChain
 from langchain_community.graphs import Neo4jGraph
@@ -11,6 +13,7 @@ from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.documents import Document
+from sentence_transformers import CrossEncoder
 from src.core.config import settings
 from src.core.exceptions import LLMProviderError, QueryExecutionError
 from src.core.logging import get_logger
@@ -249,11 +252,123 @@ QUERY_EXPANSION_PROMPT = PromptTemplate(
 
 class QAService:
     """Service for processing natural language queries using GraphRAG (Hybrid Retrieval)."""
+    
+    # Class-level cache settings
+    CACHE_MAX_SIZE = 100  # Maximum number of cached queries
+    CACHE_TTL_SECONDS = 3600  # Cache TTL: 1 hour
 
     def __init__(self, graph: Neo4jGraph) -> None:
         self.graph = graph
         self._chain: Optional[GraphCypherQAChain] = None
-        self._enable_query_expansion: bool = True  # Can be toggled
+        self._enable_query_expansion: bool = True
+        self._enable_cache: bool = True
+        self._enable_reranking: bool = True  # Toggle reranking
+        self._cache: OrderedDict = OrderedDict()
+        self._reranker: Optional[CrossEncoder] = None  # Lazy loaded
+
+    def _get_cache_key(self, question: str, include_cypher: bool) -> str:
+        """Generate a cache key from the question."""
+        # Normalize the question for better cache hits
+        normalized = question.lower().strip()
+        key_string = f"{normalized}:{include_cypher}"
+        return hashlib.md5(key_string.encode()).hexdigest()
+
+    def _get_from_cache(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        """Get result from cache if valid."""
+        if not self._enable_cache:
+            return None
+            
+        if cache_key in self._cache:
+            timestamp, result = self._cache[cache_key]
+            # Check TTL
+            if time.time() - timestamp < self.CACHE_TTL_SECONDS:
+                # Move to end (LRU)
+                self._cache.move_to_end(cache_key)
+                logger.info(f"Cache HIT for key: {cache_key[:8]}...")
+                return result
+            else:
+                # Expired, remove
+                del self._cache[cache_key]
+                logger.debug(f"Cache EXPIRED for key: {cache_key[:8]}...")
+        
+        return None
+
+    def _store_in_cache(self, cache_key: str, result: Dict[str, Any]) -> None:
+        """Store result in cache with LRU eviction."""
+        if not self._enable_cache:
+            return
+            
+        # Evict oldest if at capacity
+        while len(self._cache) >= self.CACHE_MAX_SIZE:
+            self._cache.popitem(last=False)
+        
+        self._cache[cache_key] = (time.time(), result)
+        logger.debug(f"Cache STORED for key: {cache_key[:8]}... (size: {len(self._cache)})")
+
+    def clear_cache(self) -> int:
+        """Clear the query cache. Returns number of entries cleared."""
+        count = len(self._cache)
+        self._cache.clear()
+        logger.info(f"Cache cleared: {count} entries removed")
+        return count
+
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        now = time.time()
+        valid_count = sum(1 for ts, _ in self._cache.values() if now - ts < self.CACHE_TTL_SECONDS)
+        return {
+            "enabled": self._enable_cache,
+            "total_entries": len(self._cache),
+            "valid_entries": valid_count,
+            "max_size": self.CACHE_MAX_SIZE,
+            "ttl_seconds": self.CACHE_TTL_SECONDS
+        }
+
+    def _get_reranker(self) -> CrossEncoder:
+        """Get or initialize the CrossEncoder reranker (lazy loading)."""
+        if self._reranker is None:
+            logger.info("Initializing CrossEncoder reranker (ms-marco-MiniLM-L-6-v2)...")
+            self._reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+            logger.info("Reranker initialized successfully")
+        return self._reranker
+
+    def _rerank_documents(self, query: str, docs: List[Document], top_k: int = 3) -> List[Document]:
+        """
+        Rerank documents using CrossEncoder for better relevance.
+        
+        Args:
+            query: The search query
+            docs: List of retrieved documents
+            top_k: Number of top documents to return
+            
+        Returns:
+            List[Document]: Reranked documents (best first)
+        """
+        if not self._enable_reranking or not docs:
+            return docs[:top_k]
+        
+        try:
+            reranker = self._get_reranker()
+            
+            # Create query-document pairs
+            pairs = [(query, doc.page_content) for doc in docs]
+            
+            # Get relevance scores
+            scores = reranker.predict(pairs)
+            
+            # Sort by score (descending) and get top_k
+            scored_docs = list(zip(docs, scores))
+            scored_docs.sort(key=lambda x: x[1], reverse=True)
+            
+            reranked = [doc for doc, score in scored_docs[:top_k]]
+            
+            logger.info(f"Reranked {len(docs)} docs -> top {len(reranked)} (scores: {[f'{s:.3f}' for _, s in scored_docs[:top_k]]})")
+            
+            return reranked
+            
+        except Exception as e:
+            logger.warning(f"Reranking failed: {e}, returning original order")
+            return docs[:top_k]
 
     def _get_llm(self) -> Any:
         """Get LLM instance based on configured provider."""
@@ -447,6 +562,16 @@ class QAService:
         """
         try:
             start_time = time.time()
+            
+            # --- CACHE CHECK ---
+            cache_key = self._get_cache_key(question, include_cypher)
+            cached_result = self._get_from_cache(cache_key)
+            if cached_result:
+                # Add cache indicator to metadata
+                cached_result["metadata"]["cached"] = True
+                cached_result["metadata"]["execution_time_ms"] = 0
+                return cached_result
+            
             chain = self._get_chain()
 
             logger.info(f"Processing query: {question}")
@@ -459,9 +584,15 @@ class QAService:
             
             # 1. Unstructured Retrieval (Vector Store) - use expanded query
             try:
-                # Get more broad context for the synthesis layer
-                docs = vector_service.similarity_search(expanded_query, k=3)
+                # Get more documents initially for reranking
+                initial_k = 6 if self._enable_reranking else 3
+                docs = vector_service.similarity_search(expanded_query, k=initial_k)
                 logger.info(f"Retrieved {len(docs)} context documents")
+                
+                # --- RERANKING ---
+                if docs and self._enable_reranking:
+                    docs = self._rerank_documents(expanded_query, docs, top_k=3)
+                    
             except Exception as e:
                 logger.warning(f"Vector search failed: {e}")
                 docs = []
@@ -520,6 +651,10 @@ class QAService:
             if include_cypher and cypher_query:
                 response["cypher_query"] = cypher_query
                 logger.debug(f"Generated Cypher: {cypher_query}")
+
+            # --- CACHE STORE ---
+            response["metadata"]["cached"] = False  # Fresh response
+            self._store_in_cache(cache_key, response)
 
             logger.info(f"Query processed successfully in {execution_time_ms}ms")
             return response
