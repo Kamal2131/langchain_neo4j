@@ -549,6 +549,121 @@ class QAService:
             logger.error(f"Synthesis failed: {e}")
             return f"Error synthesizing answer: {e}. Structured Data: {structured_data}"
 
+    async def _stream_synthesis(
+        self, 
+        question: str, 
+        structured_data: str, 
+        context_docs: List[Document]
+    ):
+        """
+        Stream the synthesis answer token by token.
+        
+        Yields:
+            str: Token chunks from the LLM
+        """
+        try:
+            llm = self._get_llm()
+            
+            # Format context documents
+            formatted_docs = "\n".join([f"- {d.page_content}" for d in context_docs])
+            if not formatted_docs:
+                formatted_docs = "No relevant document context found."
+
+            prompt = HYBRID_SYNTHESIS_PROMPT.format(
+                question=question,
+                structured_data=structured_data,
+                context_docs=formatted_docs
+            )
+            
+            # Stream the response
+            async for chunk in llm.astream(prompt):
+                if hasattr(chunk, 'content') and chunk.content:
+                    yield chunk.content
+                    
+        except Exception as e:
+            logger.error(f"Streaming synthesis failed: {e}")
+            yield f"\n\n[Error: {e}]"
+
+    async def stream_query(self, question: str):
+        """
+        Process a query with streaming response.
+        
+        Yields SSE-formatted chunks:
+        - event: metadata (initial context info)
+        - event: token (each answer token)
+        - event: done (completion signal)
+        
+        Args:
+            question: Natural language question
+            
+        Yields:
+            str: SSE-formatted event strings
+        """
+        import json
+        
+        try:
+            start_time = time.time()
+            logger.info(f"Streaming query: {question}")
+            
+            # Send start event
+            yield f"event: start\ndata: {json.dumps({'question': question})}\n\n"
+            
+            # Query expansion
+            expanded_query = self._expand_query(question)
+            if expanded_query != question:
+                yield f"event: metadata\ndata: {json.dumps({'expanded_query': expanded_query})}\n\n"
+            
+            # Retrieval
+            chain = self._get_chain()
+            
+            try:
+                initial_k = 6 if self._enable_reranking else 3
+                docs = vector_service.similarity_search(expanded_query, k=initial_k)
+                
+                if docs and self._enable_reranking:
+                    docs = self._rerank_documents(expanded_query, docs, top_k=3)
+                    
+                yield f"event: metadata\ndata: {json.dumps({'docs_retrieved': len(docs)})}\n\n"
+            except Exception as e:
+                logger.warning(f"Vector search failed: {e}")
+                docs = []
+            
+            # Structured retrieval
+            chain_context = "\n".join([f"- {d.page_content}" for d in docs])
+            if not chain_context:
+                chain_context = "No additional context available."
+            
+            graph_result = chain.invoke({"query": question, "context": chain_context})
+            structured_data = graph_result.get("result", "No data found in graph.")
+            
+            yield f"event: metadata\ndata: {json.dumps({'structured_retrieved': True})}\n\n"
+            
+            # Stream the synthesis
+            full_answer = ""
+            async for token in self._stream_synthesis(question, structured_data, docs):
+                full_answer += token
+                yield f"event: token\ndata: {json.dumps({'token': token})}\n\n"
+            
+            # Calculate confidence
+            confidence = self._calculate_confidence(docs, structured_data, full_answer)
+            
+            # Send completion event
+            end_time = time.time()
+            execution_time_ms = int((end_time - start_time) * 1000)
+            
+            completion_data = {
+                "confidence": confidence,
+                "execution_time_ms": execution_time_ms,
+                "provider": settings.llm_provider
+            }
+            yield f"event: done\ndata: {json.dumps(completion_data)}\n\n"
+            
+            logger.info(f"Streaming query completed in {execution_time_ms}ms")
+            
+        except Exception as e:
+            logger.error(f"Streaming query failed: {e}")
+            yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+
     def query(self, question: str, include_cypher: bool = False) -> Dict[str, Any]:
         """
         Process a natural language query using Hybrid Retrieval.

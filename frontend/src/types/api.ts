@@ -41,13 +41,26 @@ export interface QueryRequest {
     include_cypher?: boolean;
 }
 
+export interface ConfidenceScore {
+    level: 'high' | 'medium' | 'low';
+    score: number;
+    max_score: number;
+    reasons: string[];
+}
+
 export interface QueryResponse {
     question: string;
     answer: string;
+    confidence?: ConfidenceScore;
     cypher_query?: string;
     metadata?: {
         provider: string;
         model: string;
+        expanded_query?: string | null;
+        context_used?: string[];
+        execution_time_ms?: number;
+        structured_source?: string;
+        cached?: boolean;
     };
 }
 

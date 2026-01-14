@@ -4,7 +4,8 @@ Query endpoints for natural language processing.
 
 from typing import List
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 
 from src.api.schemas import (
     ErrorResponse, 
@@ -28,6 +29,54 @@ from src.services.celery_service import (
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/query", tags=["Query"])
+
+
+@router.get(
+    "/stream",
+    summary="Stream query response (SSE)",
+    description="Submit a query and receive the answer as a stream of Server-Sent Events",
+    responses={
+        200: {"description": "SSE stream of answer tokens"},
+        500: {"description": "Streaming failed"},
+    },
+)
+async def stream_query(
+    question: str = Query(..., min_length=3, max_length=500, description="Natural language question")
+):
+    """
+    Stream a query response using Server-Sent Events (SSE).
+    
+    Events:
+    - start: Query processing started
+    - metadata: Retrieval info (expanded_query, docs_retrieved, etc.)
+    - token: Answer token chunk
+    - done: Completion with confidence and timing
+    - error: Error occurred
+    
+    Example client (JavaScript):
+    ```
+    const evtSource = new EventSource('/api/v1/query/stream?question=Who%20knows%20Python');
+    evtSource.addEventListener('token', (e) => {
+        const data = JSON.parse(e.data);
+        console.log(data.token);
+    });
+    ```
+    """
+    try:
+        qa_service = get_qa_service()
+        
+        return StreamingResponse(
+            qa_service.stream_query(question),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",  # Disable nginx buffering
+            }
+        )
+    except Exception as e:
+        logger.error(f"Failed to start streaming: {e}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @router.post(
     "",
