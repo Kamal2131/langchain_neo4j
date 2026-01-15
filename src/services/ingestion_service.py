@@ -21,6 +21,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from src.core.config import settings
 from src.core.logging import get_logger
 from src.services.neo4j_service import neo4j_service
+from src.services.qdrant_service import qdrant_service
 
 logger = get_logger(__name__)
 
@@ -81,6 +82,7 @@ class IngestionService:
         self._embeddings = None
         self._semantic_chunker = None
         self._fallback_chunker = None
+        self._use_qdrant = True  # Enable Qdrant storage
 
     def _get_llm(self):
         """Get LLM instance for extraction."""
@@ -167,6 +169,45 @@ class IngestionService:
                 logger.error(f"❌ Fallback chunking also failed: {fallback_error}")
                 # Return original documents if all chunking fails
                 return documents
+
+    def _store_chunks_in_qdrant(
+        self, 
+        chunks: List[Document], 
+        doc_type: str, 
+        source: str,
+        metadata: Optional[Dict] = None
+    ) -> Dict:
+        """
+        Store document chunks in Qdrant for vector retrieval.
+        
+        Args:
+            chunks: List of document chunks
+            doc_type: Document type (contract, policy, general)
+            source: Source file/identifier
+            metadata: Additional metadata to store
+            
+        Returns:
+            dict: Upsert statistics
+        """
+        if not self._use_qdrant or not chunks:
+            return {"skipped": True}
+        
+        # Enrich chunks with metadata
+        for chunk in chunks:
+            chunk.metadata["doc_type"] = doc_type
+            chunk.metadata["source"] = source
+            if metadata:
+                for k, v in metadata.items():
+                    if isinstance(v, (str, int, float, bool)):
+                        chunk.metadata[k] = v
+        
+        try:
+            stats = qdrant_service.upsert_documents(chunks)
+            logger.info(f"✅ Stored {stats['inserted']} chunks in Qdrant for {source}")
+            return stats
+        except Exception as e:
+            logger.error(f"❌ Failed to store in Qdrant: {e}")
+            return {"error": str(e)}
 
     async def _classify_document(self, documents: List[Document]) -> str:
         """Classify document type using LLM."""
@@ -263,13 +304,22 @@ class IngestionService:
             else:
                 logger.warning(f"⚠️  Client '{client_name}' not found in graph")
         
+        # Store chunks in Qdrant for vector search
+        qdrant_stats = self._store_chunks_in_qdrant(
+            chunks=chunks,
+            doc_type="contract",
+            source=metadata.get("filename", contract_id),
+            metadata={"contract_id": contract_id, "title": contract_data.get("title")}
+        )
+        
         return {
             "status": "success",
             "document_type": "contract",
             "contract_id": contract_id,
             "title": contract_data.get("title"),
             "linked_client": client_name,
-            "chunks_created": len(chunks)
+            "chunks_created": len(chunks),
+            "qdrant_stats": qdrant_stats
         }
 
     async def _process_policy(self, documents: List[Document], metadata: Dict) -> dict:
@@ -349,13 +399,22 @@ class IngestionService:
             else:
                 logger.warning(f"⚠️  Department '{dept_name}' not found in graph")
         
+        # Store chunks in Qdrant for vector search
+        qdrant_stats = self._store_chunks_in_qdrant(
+            chunks=chunks,
+            doc_type="policy",
+            source=metadata.get("filename", policy_id),
+            metadata={"policy_id": policy_id, "title": policy_data.get("title")}
+        )
+        
         return {
             "status": "success",
             "document_type": "policy",
             "policy_id": policy_id,
             "title": policy_data.get("title"),
             "linked_departments": linked_depts,
-            "chunks_created": len(chunks)
+            "chunks_created": len(chunks),
+            "qdrant_stats": qdrant_stats
         }
 
     async def _process_general_document(self, documents: List[Document], metadata: Dict) -> dict:
@@ -384,13 +443,22 @@ class IngestionService:
         total_nodes = sum(len(doc.nodes) for doc in graph_documents)
         total_relationships = sum(len(doc.relationships) for doc in graph_documents)
         
+        # Store chunks in Qdrant for vector search
+        qdrant_stats = self._store_chunks_in_qdrant(
+            chunks=chunks,
+            doc_type="general",
+            source=metadata.get("filename", "general_doc"),
+            metadata={"nodes_extracted": total_nodes}
+        )
+        
         return {
             "status": "success",
             "document_type": "general",
             "nodes_created": total_nodes,
             "relationships_created": total_relationships,
             "pages_processed": len(documents),
-            "chunks_created": len(chunks)
+            "chunks_created": len(chunks),
+            "qdrant_stats": qdrant_stats
         }
 
     async def process_pdf(self, file_path: str, metadata: Dict = None) -> dict:

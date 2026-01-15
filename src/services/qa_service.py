@@ -18,6 +18,7 @@ from src.core.config import settings
 from src.core.exceptions import LLMProviderError, QueryExecutionError
 from src.core.logging import get_logger
 from src.services.vector_service import vector_service
+from src.services.qdrant_service import qdrant_service
 
 logger = get_logger(__name__)
 
@@ -262,9 +263,10 @@ class QAService:
         self._chain: Optional[GraphCypherQAChain] = None
         self._enable_query_expansion: bool = True
         self._enable_cache: bool = True
-        self._enable_reranking: bool = True  # Toggle reranking
+        self._enable_reranking: bool = True
+        self._use_qdrant: bool = True  # Use Qdrant for vector search (faster)
         self._cache: OrderedDict = OrderedDict()
-        self._reranker: Optional[CrossEncoder] = None  # Lazy loaded
+        self._reranker: Optional[CrossEncoder] = None
 
     def _get_cache_key(self, question: str, include_cypher: bool) -> str:
         """Generate a cache key from the question."""
@@ -618,7 +620,11 @@ class QAService:
             
             try:
                 initial_k = 6 if self._enable_reranking else 3
-                docs = vector_service.similarity_search(expanded_query, k=initial_k)
+                
+                if self._use_qdrant:
+                    docs = qdrant_service.similarity_search(expanded_query, k=initial_k)
+                else:
+                    docs = vector_service.similarity_search(expanded_query, k=initial_k)
                 
                 if docs and self._enable_reranking:
                     docs = self._rerank_documents(expanded_query, docs, top_k=3)
@@ -701,8 +707,16 @@ class QAService:
             try:
                 # Get more documents initially for reranking
                 initial_k = 6 if self._enable_reranking else 3
-                docs = vector_service.similarity_search(expanded_query, k=initial_k)
-                logger.info(f"Retrieved {len(docs)} context documents")
+                vector_backend = "qdrant" if self._use_qdrant else "neo4j"
+                
+                if self._use_qdrant:
+                    # Use Qdrant for faster similarity search
+                    docs = qdrant_service.similarity_search(expanded_query, k=initial_k)
+                else:
+                    # Fall back to Neo4j vector search
+                    docs = vector_service.similarity_search(expanded_query, k=initial_k)
+                    
+                logger.info(f"Retrieved {len(docs)} docs from {vector_backend}")
                 
                 # --- RERANKING ---
                 if docs and self._enable_reranking:

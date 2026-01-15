@@ -107,6 +107,28 @@ class Settings(BaseSettings):
         alias="CHUNK_OVERLAP",
         description="Overlap between chunks to maintain context"
     )
+    
+    # Qdrant Configuration
+    qdrant_host: str = Field(
+        default="localhost",
+        alias="QDRANT_HOST",
+        description="Qdrant server hostname"
+    )
+    qdrant_port: int = Field(
+        default=6333,
+        alias="QDRANT_PORT",
+        description="Qdrant REST API port"
+    )
+    qdrant_collection: str = Field(
+        default="documents",
+        alias="QDRANT_COLLECTION",
+        description="Default Qdrant collection name"
+    )
+    qdrant_api_key: Optional[str] = Field(
+        default=None,
+        alias="QDRANT_API_KEY",
+        description="Qdrant API key (optional, for cloud)"
+    )
 
     @field_validator("llm_provider")
     @classmethod
