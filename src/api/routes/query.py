@@ -25,6 +25,7 @@ from src.services.celery_service import (
     get_task_status as get_celery_task_status,
     get_task_result as get_celery_task_result,
 )
+from src.agents.rag_agent import rag_agent
 
 logger = get_logger(__name__)
 
@@ -253,3 +254,74 @@ async def retrieve_task_result(task_id: str) -> TaskResultResponse:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
         ) from e
+
+
+# ============ AGENTIC ENDPOINTS ============
+
+@router.post(
+    "/agent",
+    status_code=status.HTTP_200_OK,
+    summary="Process query with agentic reasoning",
+    description="Submit a query to the ReAct agent that uses multi-step reasoning and tool calling",
+    responses={
+        200: {"description": "Agentic query executed successfully"},
+        500: {"description": "Agent execution failed"},
+    },
+)
+async def agent_query(request: QueryRequest):
+    """
+    Process a query using the agentic RAG system.
+    
+    The agent will:
+    1. Think about what information is needed
+    2. Call appropriate tools (graph_search, vector_search, etc.)
+    3. Observe results and iterate if needed
+    4. Provide a final answer with reasoning trace
+    
+    Returns:
+        Dict with answer, thoughts, tools_used, and iterations
+    """
+    try:
+        logger.info(f"[AGENT] Received agentic query: {request.question}")
+        result = rag_agent.query(request.question)
+        return result
+    except Exception as e:
+        logger.error(f"[AGENT] Query failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.get(
+    "/agent/stream",
+    summary="Stream agentic query (SSE)",
+    description="Stream agent thoughts, tool calls, and answer in real-time",
+    responses={
+        200: {"description": "SSE stream of agent events"},
+        500: {"description": "Streaming failed"},
+    },
+)
+async def stream_agent_query(
+    question: str = Query(..., min_length=3, max_length=500, description="Natural language question")
+):
+    """
+    Stream an agentic query using Server-Sent Events.
+    
+    Events:
+    - start: Query started
+    - thought: Agent reasoning step
+    - tool: Tool called with result preview
+    - answer: Final answer
+    - done: Execution complete with stats
+    """
+    try:
+        return StreamingResponse(
+            rag_agent.stream_query(question),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+        )
+    except Exception as e:
+        logger.error(f"[AGENT] Streaming failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e)) from e

@@ -19,6 +19,7 @@ from src.core.exceptions import LLMProviderError, QueryExecutionError
 from src.core.logging import get_logger
 from src.services.vector_service import vector_service
 from src.services.qdrant_service import qdrant_service
+from src.services.query_router import query_router, QueryType
 
 logger = get_logger(__name__)
 
@@ -264,7 +265,8 @@ class QAService:
         self._enable_query_expansion: bool = True
         self._enable_cache: bool = True
         self._enable_reranking: bool = True
-        self._use_qdrant: bool = True  # Use Qdrant for vector search (faster)
+        self._enable_routing: bool = True  # Agent-based query routing
+        self._use_qdrant: bool = True
         self._cache: OrderedDict = OrderedDict()
         self._reranker: Optional[CrossEncoder] = None
 
@@ -697,36 +699,42 @@ class QAService:
 
             logger.info(f"Processing query: {question}")
             
+            # --- QUERY ROUTING ---
+            # Classify query and decide retrieval strategy
+            routing_decision = None
+            if self._enable_routing:
+                routing_decision = query_router.route(question)
+                logger.info(f"Routed to: {routing_decision.query_type.value} (conf: {routing_decision.confidence:.2f})")
+            
             # --- QUERY EXPANSION ---
-            # Rewrite vague queries for better retrieval
             expanded_query = self._expand_query(question)
             
-            # --- PARALLEL RETRIEVAL ---
+            # --- INTELLIGENT RETRIEVAL BASED ON ROUTING ---
+            docs = []
+            structured_data = ""
             
-            # 1. Unstructured Retrieval (Vector Store) - use expanded query
-            try:
-                # Get more documents initially for reranking
-                initial_k = 6 if self._enable_reranking else 3
-                vector_backend = "qdrant" if self._use_qdrant else "neo4j"
-                
-                if self._use_qdrant:
-                    # Use Qdrant for faster similarity search
-                    docs = qdrant_service.similarity_search(expanded_query, k=initial_k)
-                else:
-                    # Fall back to Neo4j vector search
-                    docs = vector_service.similarity_search(expanded_query, k=initial_k)
+            # Vector retrieval (for VECTOR and HYBRID queries)
+            use_vector = routing_decision.use_vector if routing_decision else True
+            if use_vector:
+                try:
+                    initial_k = 6 if self._enable_reranking else 3
+                    vector_backend = "qdrant" if self._use_qdrant else "neo4j"
                     
-                logger.info(f"Retrieved {len(docs)} docs from {vector_backend}")
-                
-                # --- RERANKING ---
-                if docs and self._enable_reranking:
-                    docs = self._rerank_documents(expanded_query, docs, top_k=3)
+                    if self._use_qdrant:
+                        docs = qdrant_service.similarity_search(expanded_query, k=initial_k)
+                    else:
+                        docs = vector_service.similarity_search(expanded_query, k=initial_k)
+                        
+                    logger.info(f"Retrieved {len(docs)} docs from {vector_backend}")
                     
-            except Exception as e:
-                logger.warning(f"Vector search failed: {e}")
-                docs = []
+                    if docs and self._enable_reranking:
+                        docs = self._rerank_documents(expanded_query, docs, top_k=3)
+                        
+                except Exception as e:
+                    logger.warning(f"Vector search failed: {e}")
+                    docs = []
 
-            # 2. Structured Retrieval (Graph Database)
+            # Graph retrieval (for GRAPH and HYBRID queries)
             # We use the existing chain, but we treat its output as "Structured Facts"
             # We inject the docs into the chain's context to help it generate better Cypher if needed 
             # (though mainly we want the data it returns)
@@ -762,7 +770,7 @@ class QAService:
             response = {
                 "question": question,
                 "answer": final_answer,
-                "confidence": confidence,  # NEW: Confidence assessment
+                "confidence": confidence,
                 "metadata": {
                     "provider": settings.llm_provider,
                     "model": (
@@ -773,7 +781,14 @@ class QAService:
                     "expanded_query": expanded_query if expanded_query != question else None,
                     "context_used": [d.page_content for d in docs] if docs else [],
                     "execution_time_ms": execution_time_ms,
-                    "structured_source": structured_data
+                    "structured_source": structured_data,
+                    # NEW: Routing metadata
+                    "routing": {
+                        "query_type": routing_decision.query_type.value if routing_decision else "hybrid",
+                        "strategy": f"{'graph+' if (routing_decision and routing_decision.use_graph) else ''}{'vector' if (routing_decision and routing_decision.use_vector) else ''}" if routing_decision else "hybrid",
+                        "confidence": routing_decision.confidence if routing_decision else 0.0,
+                        "reasoning": routing_decision.reasoning if routing_decision else "Default hybrid routing"
+                    } if self._enable_routing else None
                 },
             }
 
